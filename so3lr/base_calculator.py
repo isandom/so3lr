@@ -15,11 +15,12 @@ def make_so3lr(
         # Use default SO3LR params directory
         package_dir = pathlib.Path(__file__).parent.parent.resolve()
         workdir_path = package_dir / 'so3lr' / 'params'
-        from_file = True
     else:
-        # Use provided workdir
-        workdir_path = pathlib.Path(workdir).expanduser().resolve()
-        from_file = False
+        workdir_path = pathlib.Path(workdir)
+
+    # Auto-detect: prefer params.pkl if available, fallback to checkpoints
+    params_pkl_path = workdir_path / 'params.pkl'
+    from_file = params_pkl_path.exists()
 
     model, params = load_model_from_workdir(
         workdir_path,
@@ -37,8 +38,6 @@ def make_so3lr(
         num_theory_levels=16
         old_energy_offset = params['params']['observables_0']['energy_offset']
         if len(old_energy_offset.shape) == 1:
-            # print("\nOriginal energy_offset:")
-            # print("Shape:", params['params']['observables_0']['energy_offset'].shape)
             new_energy_offset = jnp.tile(old_energy_offset[:, None], (1, num_theory_levels))
             params['params']['observables_0']['energy_offset'] = new_energy_offset
 
@@ -49,10 +48,6 @@ def make_so3lr(
             old_kernel = params['params']['observables_0']['energy_dense_final']['kernel']
             new_kernel = jnp.tile(old_kernel, (1, num_theory_levels))
             params['params']['observables_0']['energy_dense_final']['kernel'] = new_kernel
-
-            # print("\nNew energy_offset:")
-            # print("Shape:", params['params']['observables_0']['energy_offset'].shape)
-            # print("Values:", params['params']['observables_0']['energy_offset'])
 
     def forward(
             positions,
