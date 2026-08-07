@@ -27,13 +27,17 @@ def jraph_to_ase_atoms(graph):
         pbc=pbc
     )
 
-    atoms.info['charge'] = int(graph.globals["total_charge"])
+    atoms.info['charge'] = int(np.asarray(graph.globals["total_charge"]).flatten()[0])
     atoms.info['energy'] = float(f'{float(graph.globals["energy"][0]):.6g}')
     atoms.info['energy_so3lr'] = float(f'{float(graph.globals["energy_so3lr"][0]):.6g}')
     atoms.arrays['forces'] = graph.nodes['forces']
     atoms.arrays['forces_so3lr'] = graph.nodes['forces_so3lr']
     atoms.arrays['hirshfeld_ratios'] = graph.nodes['hirshfeld_ratios']
     atoms.arrays['hirshfeld_ratios_so3lr'] = graph.nodes['hirshfeld_ratios_so3lr']
+    if 'partial_charges' in graph.nodes:
+        atoms.arrays['partial_charges'] = graph.nodes['partial_charges']
+    if 'partial_charges_so3lr' in graph.nodes:
+        atoms.arrays['partial_charges_so3lr'] = graph.nodes['partial_charges_so3lr']
     atoms.info['dipole_vec'] = np.array([float(f'{x:.6g}') for x in graph.globals['dipole_vec'].flatten()])
     atoms.info['dipole_vec_so3lr'] = np.array([float(f'{x:.6g}') for x in graph.globals['dipole_vec_so3lr'].flatten()])
 

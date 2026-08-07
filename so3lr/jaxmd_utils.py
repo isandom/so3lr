@@ -8,7 +8,7 @@ from jax_md.space import DisplacementOrMetricFn, Box, transform
 from so3lr.graph import Graph
 
 
-def neighbor_list_featurizer(displacement_fn, species, fractional_coordinates=True):
+def neighbor_list_featurizer(displacement_fn, species, total_charge=0., num_unpaired_electrons=0., dtype=jnp.float32, fractional_coordinates=True):
     def featurize(R, neighbor, neighbor_lr, **kwargs):
         idx_i = neighbor[0]  # shape: P
         idx_j = neighbor[1]  # shape: P
@@ -38,12 +38,15 @@ def neighbor_list_featurizer(displacement_fn, species, fractional_coordinates=Tr
 
         if 'k_grid' in kwargs:
             k_grid = kwargs.get('k_grid')
-            if fractional_coordinates:
-                positions = transform(box, R) # transform to non-fractional coordinates
-            else:
-                positions = R
         if 'k_smearing' in kwargs:
             k_smearing = kwargs.get('k_smearing')
+
+        # Resolve Cartesian positions (needed for k-space and/or perturbation)
+        if k_grid is not None or 'perturbation' in kwargs:
+            if fractional_coordinates:
+                positions = transform(box, R)  # fractional → Cartesian
+            else:
+                positions = R
 
         if 'perturbation' in kwargs:
             pert = kwargs.get('perturbation')
@@ -61,8 +64,8 @@ def neighbor_list_featurizer(displacement_fn, species, fractional_coordinates=Tr
             centers=idx_i,
             others=idx_j,
             mask=None,
-            total_charge=jnp.array([0.]),
-            num_unpaired_electrons=jnp.array([0.]),
+            total_charge=jnp.array([total_charge], dtype=dtype),
+            num_unpaired_electrons=jnp.array([num_unpaired_electrons], dtype=dtype),
             edges_lr=dR_lr,
             idx_i_lr=idx_i_lr,
             idx_j_lr=idx_j_lr,
@@ -90,6 +93,9 @@ def to_jax_md(
         minimum_cell_size_multiplier_lr: float = 1.0,
         disable_cell_list: bool = False,
         fractional_coordinates: bool = True,
+        total_charge: float = 0.,
+        num_unpaired_electrons: float = 0.,
+        dtype: jnp.dtype = jnp.float32,
         **neighbor_kwargs
 ):
     # create the neighbor_fn
@@ -123,6 +129,9 @@ def to_jax_md(
     featurizer = neighbor_list_featurizer(
         displacement_or_metric,
         species,
+        total_charge=total_charge,
+        num_unpaired_electrons=num_unpaired_electrons,
+        dtype=dtype,
         fractional_coordinates=fractional_coordinates,
     )
 

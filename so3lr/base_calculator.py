@@ -9,7 +9,9 @@ def make_so3lr(
     lr_cutoff=12.,
     dispersion_energy_cutoff_lr_damping=2.,
     calculate_forces=True,
-    workdir=None
+    workdir=None,
+    neighborlist_format_lr='sparse',
+    output_intermediate_quantities=None
 ):
     if workdir is None:
         # Use default SO3LR params directory
@@ -29,8 +31,9 @@ def make_so3lr(
         long_range_kwargs=dict(
             cutoff_lr=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
-            neighborlist_format_lr='sparse'
-        )
+            neighborlist_format_lr=neighborlist_format_lr
+        ),
+        output_intermediate_quantities=output_intermediate_quantities
     )
 
     # Change shapes to allow for multiple theory levels, only needed for https://github.com/kabylda/mlff/tree/v1.0-tfds-pme version

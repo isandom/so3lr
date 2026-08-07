@@ -57,6 +57,8 @@ def process_predictions(
     graph_batch.nodes['hirshfeld_ratios_so3lr'] = output_prediction['hirshfeld_ratios']
     graph_batch.globals['energy_so3lr'] = output_prediction['energy']
     graph_batch.globals['dipole_vec_so3lr'] = output_prediction['dipole_vec']
+    if 'partial_charges' in output_prediction:
+        graph_batch.nodes['partial_charges_so3lr'] = output_prediction['partial_charges']
     # graph_batch.nodes['c6_ratios_so3lr'] = output_prediction['c6_ratios']
 
     # Unbatch the graphs and filter out padding
@@ -219,13 +221,16 @@ def evaluate_so3lr_on(
         save_to.parent.mkdir(parents=True, exist_ok=True)
 
     # Initialize the model
+    intermediate = ['partial_charges'] if 'partial_charges' in target_list else None
+
     if model_path is None:
         logger.info("Using default SO3LR potential")
         #TODO: add precision handling
         so3lr_calc = make_so3lr(
             lr_cutoff=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_damping,
-            calculate_forces=True
+            calculate_forces=True,
+            output_intermediate_quantities=intermediate
         ) 
         cutoff = 4.5 # Default cutoff for SO3LR
     else:
@@ -234,7 +239,8 @@ def evaluate_so3lr_on(
             workdir=model_path,
             lr_cutoff=lr_cutoff,
             dispersion_energy_cutoff_lr_damping=dispersion_damping,
-            calculate_forces=True
+            calculate_forces=True,
+            output_intermediate_quantities=intermediate
         )
 
         with open(Path(model_path) / "hyperparameters.json", "r") as fp:
@@ -443,6 +449,8 @@ def assign_mask(x: str, inputs: Dict[str, Any]) -> np.ndarray:
     elif x == 'dipole_vec':
         return graph_mask
     elif x == 'hirshfeld_ratios':
+        return node_mask
+    elif x == 'partial_charges':
         return node_mask
     # elif x == 'c6_ratios':
     #     return node_mask
