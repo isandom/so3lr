@@ -1,6 +1,6 @@
-"""Command line interfaces for SO3LR."""
 import os
 import sys
+
 import jax
 import ase
 import time
@@ -115,6 +115,7 @@ DEFAULT_NHC_CHAIN_LENGTH = 3
 DEFAULT_NHC_INTEGRATION_STEPS = 2
 DEFAULT_NHC_THERMO = 100.0  # thermostat damping parameter multiplier, i.e. Tdamp = dt * DEFAULT_NHC_THERMO
 DEFAULT_NHC_BARO = 1000.0  # barostat damping parameter multiplier, i.e. Pdamp = dt * DEFAULT_NHC_BARO
+DEFAULT_LANGEVIN_GAMMA = 0.1  # friction coefficient in ps^-1
 
 # Geometry optimization parameters with FIRE
 # More details here: https://jax-md.readthedocs.io/en/main/jax_md.minimize.html#jax_md.minimize.fire_descent
@@ -1072,6 +1073,11 @@ def fire_optimization(
               help=f'Thermostat damping factor in units of timestep, i.e. dt*nhc_thermo. [default: {DEFAULT_NHC_THERMO}]')
 @click.option('--nhc-sy-steps', default=DEFAULT_SUZUKI_YOSHIDA_STEPS, type=int,
               help=f'Number of Suzuki-Yoshida integration steps [default: {DEFAULT_SUZUKI_YOSHIDA_STEPS}].')
+# Thermostat selection
+@click.option('--thermostat', default='nhc', type=click.Choice(['nhc', 'langevin'], case_sensitive=False),
+              help='Thermostat type: "nhc" (Nose-Hoover chain) or "langevin" (BAOAB). [default: nhc]')
+@click.option('--gamma', 'langevin_gamma', default=DEFAULT_LANGEVIN_GAMMA, type=float,
+              help=f'Langevin friction coefficient in ps^-1 (only used with --thermostat langevin). [default: {DEFAULT_LANGEVIN_GAMMA}]')
 # Restart options
 @click.option('--restart-save', type=click.Path(), default=None,
               help='Path to save restart data.')
@@ -1084,6 +1090,8 @@ def fire_optimization(
               help='Force convergence criterion in eV/Å for initial relaxation. [default: None]')
 @click.option('--seed', default=DEFAULT_SEED, type=int,
               help=f'Random seed for MD. [default: {DEFAULT_SEED}]')
+@click.option('--fix-com/--no-fix-com', 'fix_com', default=True,
+              help='Remove center of mass momentum (Langevin only). [default: fix-com]')
 # Help option
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def nvt_md(
@@ -1110,6 +1118,9 @@ def nvt_md(
     nhc_steps: int,
     nhc_thermo: float,
     nhc_sy_steps: int,
+    # Thermostat selection
+    thermostat: str,
+    langevin_gamma: float,
     # Restart options
     restart_save: Optional[str],
     restart_load: Optional[str],
@@ -1117,6 +1128,7 @@ def nvt_md(
     relax: bool,
     force_conv: Optional[float],
     seed: int,
+    fix_com: bool,
     # Help option
     help: bool,
     # Optional arguments
@@ -1173,15 +1185,20 @@ def nvt_md(
     logger.info(f"Total charge:              {total_charge}")
     logger.info(f"Temperature:               {temperature} K")
     logger.info(f"Ensemble:                  NVT")
+    if thermostat.lower() == 'langevin':
+        logger.info(f"Thermostat:                Langevin (BAOAB)")
+        logger.info(f"Friction coefficient:      {langevin_gamma} ps^-1")
+    else:
+        logger.info(f"Thermostat:                Nose-Hoover Chain (NHC)")
+        logger.info(f"NHC chain length:          {nhc_chain}")
+        logger.info(f"Nose-Hoover steps:         {nhc_steps}")
+        logger.info(f"Nose-Hoover Tdamp:         {nhc_thermo*dt} fs")
+    logger.info(f"Random seed:               {seed}")
     logger.info(f"Simulation length:         {total_steps} steps ({simulation_time:.2f} ps)")
     logger.info(f"MD cycles:                 {md_cycles}")
     logger.info(f"Steps per cycle:           {md_steps}")
     logger.info(f"Timestep:                  {dt} fs")
     logger.info(f"Saving buffer size:        {save_buffer}")
-    logger.info(f"NHC chain length:          {nhc_chain}")
-    logger.info(f"Nose-Hoover steps:         {nhc_steps}")
-    logger.info(f"Nose-Hoover Tdamp:         {nhc_thermo*dt} fs")
-    logger.info(f"Random seed:               {seed}")
 
     if restart_load:
         logger.info(f"Restart from:              {restart_load}")
@@ -1226,6 +1243,9 @@ def nvt_md(
         'nhc_steps': nhc_steps,
         'nhc_thermo': nhc_thermo,
         'nhc_sy_steps': nhc_sy_steps,
+        # Thermostat selection
+        'thermostat': thermostat.lower(),
+        'langevin_gamma': langevin_gamma,
         # Use default optimization settings
         'min_n_min': DEFAULT_MIN_N_MIN, 
         'min_start_dt': DEFAULT_MIN_START_DT,
@@ -1233,6 +1253,7 @@ def nvt_md(
         'min_cycles': DEFAULT_MIN_CYCLES,
         'min_steps': DEFAULT_MIN_STEPS,
         'ensemble': 'nvt',
+        'fix_com': fix_com,
     }
 
     # Add log settings to the settings dictionary
@@ -1309,6 +1330,7 @@ def nvt_md(
               help='Force convergence criterion in eV/Å for initial relaxation. [default: None]')
 @click.option('--seed', default=DEFAULT_SEED, type=int,
               help=f'Random seed for MD. [default: {DEFAULT_SEED}]')
+
 # Help option
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def npt_md(
@@ -1529,6 +1551,7 @@ def npt_md(
               help='Force convergence criterion in eV/Å for initial relaxation. [default: None]')
 @click.option('--seed', default=DEFAULT_SEED, type=int,
               help=f'Random seed for MD. [default: {DEFAULT_SEED}]')
+
 # Help option
 @click.option('--help', '-h', is_flag=True, help='Show brief command overview.')
 def nve_md(
@@ -2036,6 +2059,5 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-
 
 

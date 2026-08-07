@@ -925,7 +925,7 @@ def compute_quantities(
             k_grid=k_grid
         )
 
-        if ensemble == 'nvt':
+        if ensemble == 'nvt' and not isinstance(state, jax_md.simulate.NVTLangevinState):
             H = jax_md.simulate.nvt_nose_hoover_invariant(
                 energy_fn,
                 state,
@@ -945,7 +945,7 @@ def compute_quantities(
                 neighbor_lr=nbrs_lr.idx,
                 k_grid=k_grid
             )
-        else:
+        else:  # nve, langevin — no conserved invariant
             H = None
 
     else:
@@ -955,7 +955,7 @@ def compute_quantities(
             box=box,
             k_grid=k_grid
         )
-        if ensemble == 'nvt':
+        if ensemble == 'nvt' and not isinstance(state, jax_md.simulate.NVTLangevinState):
             H = jax_md.simulate.nvt_nose_hoover_invariant(
                 energy_fn,
                 state,
@@ -973,7 +973,7 @@ def compute_quantities(
                 neighbor=nbrs.idx,
                 k_grid=k_grid
             )
-        else:
+        else:  # nve, langevin — no conserved invariant
             H = None
 
     current_T = jax_md.quantity.temperature(
@@ -1086,6 +1086,46 @@ def create_nhc_fn(
     return init_fn, step_md_fn
 
 
+def create_langevin_fn(
+    energy_fn: callable,
+    shift: callable,
+    dt: float,
+    T: float,
+    gamma: float,
+    lr: bool,
+    center_velocity: bool = False
+) -> Tuple[callable, callable]:
+    """
+    Create the Langevin (BAOAB) thermostat functions.
+
+    Args:
+        energy_fn (callable): Function that calculates the energy.
+        shift (callable): Function that shifts the positions.
+        dt (float): Time step (in ps, JAX-MD internal units).
+        T (float): Target temperature (in kT units, JAX-MD internal units).
+        gamma (float): Friction coefficient in ps^-1 (JAX-MD internal time units).
+        lr (bool): Whether to use long-range interactions.
+        center_velocity (bool): Whether to center velocity at each step.
+
+    Returns:
+        Tuple[callable, callable]: JIT-compiled init and step functions.
+    """
+    init_fn, apply_fn = jax_md.simulate.nvt_langevin(
+        energy_fn,
+        shift,
+        dt=dt,
+        kT=T,
+        gamma=gamma,
+        center_velocity=center_velocity
+    )
+    init_fn = jax.jit(init_fn)
+    apply_fn = jax.jit(apply_fn)
+
+    step_md_fn = create_md_fn('langevin', lr, apply_fn, T)
+
+    return init_fn, step_md_fn
+
+
 def create_npt_nhc_fn(
     energy_fn,
     shift,
@@ -1179,7 +1219,7 @@ def create_nvt_step_fn(
     T: float,
 ) -> callable:
     """
-    Create the NVT step function.
+    Create the NVT step function (NHC thermostat).
 
     Args:
         lr (bool): Whether to use long-range interactions.
@@ -1232,6 +1272,71 @@ def create_nvt_step_fn(
             )
             return state, nbrs, box, k_grid
         return step_nvt_fn
+
+
+def create_langevin_step_fn(
+    lr: bool,
+    apply_fn: callable,
+    T: float,
+) -> callable:
+    """
+    Create the NVT step function for the Langevin (BAOAB) thermostat.
+
+    The Langevin state carries an internal PRNG key instead of a chain, so
+    `apply_fn` must be called without an explicit `box` keyword (the box is
+    embedded in the `shift_fn` closure for free-boundary systems, and passed
+    via `**kwargs` for periodic ones).
+
+    Args:
+        lr (bool): Whether to use long-range interactions.
+        apply_fn (callable): Langevin step function from `jax_md.simulate.nvt_langevin`.
+        T (float): Target temperature (in kT internal units).
+
+    Returns:
+        callable: Langevin step function compatible with `jax.lax.fori_loop`.
+    """
+    if lr:
+        @jax.jit
+        def step_langevin_fn_lr(i: int, state):
+            state, nbrs, nbrs_lr, box, k_grid = state
+            state = apply_fn(
+                state,
+                neighbor=nbrs.idx,
+                neighbor_lr=nbrs_lr.idx,
+                kT=T,
+                box=box,
+                k_grid=k_grid
+            )
+            nbrs = nbrs.update(
+                state.position,
+                neighbor=nbrs.idx,
+                box=box
+            )
+            nbrs_lr = nbrs_lr.update(
+                state.position,
+                neighbor=nbrs_lr.idx,
+                box=box
+            )
+            return state, nbrs, nbrs_lr, box, k_grid
+        return step_langevin_fn_lr
+    else:
+        @jax.jit
+        def step_langevin_fn(i: int, state):
+            state, nbrs, box, k_grid = state
+            state = apply_fn(
+                state,
+                neighbor=nbrs.idx,
+                kT=T,
+                box=box,
+                k_grid=k_grid
+            )
+            nbrs = nbrs.update(
+                state.position,
+                neighbor=nbrs.idx,
+                box=box
+            )
+            return state, nbrs, box, k_grid
+        return step_langevin_fn
 
 
 def create_npt_step_fn(
@@ -1336,11 +1441,13 @@ def create_md_fn(
         return create_nve_step_fn(lr, apply_fn)
     elif ensemble == 'nvt':
         return create_nvt_step_fn(lr, apply_fn, T)
+    elif ensemble == 'langevin':
+        return create_langevin_step_fn(lr, apply_fn, T)
     elif ensemble == 'npt':
         return create_npt_step_fn(lr, apply_fn, T, P)
     else:
         raise NotImplementedError(
-            f'Ensemble "{ensemble}" is not supported. Only NVE, NVT and NPT ensembles are currently implemented.')
+            f'Ensemble "{ensemble}" is not supported. Only NVE, NVT (nhc/langevin) and NPT ensembles are currently implemented.')
 
 def create_obs_fn(
     energy_or_obs_fn: callable,
@@ -1524,6 +1631,9 @@ def perform_md(
     nhc_thermo = all_settings.get('nhc_thermo')
     nhc_baro = all_settings.get('nhc_baro')
     nhc_sy_steps = all_settings.get('nhc_sy_steps')
+    # Langevin-specific parameters
+    thermostat = all_settings.get('thermostat', 'nhc')  # 'nhc' or 'langevin'
+    langevin_gamma = all_settings.get('langevin_gamma', 0.1)  # friction in ps^-1
 
     # Format control
     output_format = all_settings.get('output_format')
@@ -1532,6 +1642,7 @@ def perform_md(
     relax_before_run = all_settings.get('relax_before_run')
     observables = all_settings.get('observables', [])
     output_atom_indices = all_settings.get('output_atom_indices', None)
+    fix_com = all_settings.get('fix_com', False)
 
     # Handling of restart
     if restart_save_path is not None:
@@ -1718,15 +1829,35 @@ def perform_md(
             lr,
         )
     elif ensemble == 'nvt':
-        init_fn, step_md_fn = create_nhc_fn(
-            energy_fn,
-            shift,
-            md_dt,
-            md_T,
-            box,
-            nhc_kwargs,
-            lr
-        )
+        if thermostat == 'langevin':
+            # Convert gamma from ps^-1 to JAX-MD internal time units (same scale as dt in ps)
+            logger.info(f'Using Langevin thermostat with gamma={langevin_gamma} ps^-1.')
+            # The Langevin friction gamma must be converted to internal units (1/time)
+            # handle_units converted dt using unit['time'], so we divide gamma by that.
+            time_unit_factor = units.metal_unit_system()['time']
+            internal_gamma = langevin_gamma / time_unit_factor
+
+            init_fn, step_md_fn = create_langevin_fn(
+                energy_fn,
+                shift,
+                md_dt,
+                md_T,
+                internal_gamma,
+                lr,
+                center_velocity=fix_com
+            )
+        else:
+            if thermostat != 'nhc':
+                logger.warning(f'Unknown thermostat "{thermostat}", falling back to NHC.')
+            init_fn, step_md_fn = create_nhc_fn(
+                energy_fn,
+                shift,
+                md_dt,
+                md_T,
+                box,
+                nhc_kwargs,
+                lr
+            )
     else:
         init_fn, step_md_fn = create_npt_nhc_fn(
             energy_fn,
@@ -1740,29 +1871,31 @@ def perform_md(
         )
 
     if not restart:
+        # nvt_langevin init_fn does not accept box= (shift closure captures it)
+        _langevin = (ensemble == 'nvt' and thermostat == 'langevin')
         if lr:
-            state = init_fn(
-                rng_key,
-                position,
-                box=box,
+            _init_kwargs = dict(
                 neighbor=nbrs.idx,
                 neighbor_lr=nbrs_lr.idx,
                 kT=md_T,
                 mass=initial_geometry_dict['masses'],
-                velocities = initial_geometry_dict.get('velocities'),
+                velocities=initial_geometry_dict.get('velocities'),
                 k_grid=k_grid
             )
+            if not _langevin:
+                _init_kwargs['box'] = box
+            state = init_fn(rng_key, position, **_init_kwargs)
         else:
-            state = init_fn(
-                rng_key,
-                position,
-                box=box,
+            _init_kwargs = dict(
                 neighbor=nbrs.idx,
                 kT=md_T,
                 mass=initial_geometry_dict['masses'],
-                velocities = initial_geometry_dict.get('velocities'),
+                velocities=initial_geometry_dict.get('velocities'),
                 k_grid=k_grid
             )
+            if not _langevin:
+                _init_kwargs['box'] = box
+            state = init_fn(rng_key, position, **_init_kwargs)
 
     # Setup additional observables
     obs_dict={}
@@ -1796,12 +1929,12 @@ def perform_md(
     )
     if ensemble == 'npt':
         if len(box) == 1:
-            logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{box[0]:.3f}\t{0.0:.2e}')
+            logger.info(f'0\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{box[0]:.3f}\t{0.0:.2e}')
         else:
-            logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t'+
+            logger.info(f'0\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t'+
                         f'({box[0]:.3f},{box[1]:.3f},{box[2]:.3f})\t{0.0:.2e}')
     else:
-        logger.info(f'{current_cycle*md_steps}\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{0.0:.2e}')
+        logger.info(f'0\t{KE+PE:.3f}\t{KE:.3f}\t{PE:.3f}\t{(H or 0.0):.3f}\t{current_T:.1f}\t{0.0:.2e}')
 
     momenta, positions, boxes = [], [], []
     cycle_md = 0
@@ -1820,6 +1953,7 @@ def perform_md(
                     (state, nbrs, nbrs_lr, box, k_grid)
                 )
             )
+            time_per_step = (time.time() - old_time) / md_steps
         else:
             new_state, nbrs, new_box, k_grid = jax.block_until_ready(
                 jax.lax.fori_loop(
@@ -1829,8 +1963,7 @@ def perform_md(
                     (state, nbrs, box, k_grid)
                 )
             )
-
-        time_per_step = (time.time() - old_time) / md_steps
+            time_per_step = (time.time() - old_time) / md_steps
 
         # Do not count first `allocation` loop for time_per_step calculation
         if not first_loop:
@@ -1854,6 +1987,8 @@ def perform_md(
 
             state = new_state
             box = new_box
+
+
 
             if (ensemble == 'npt') and (current_cycle % kspace_npt_cycles == 0):
                 k_grid,_ = setup_kspace_grid(
